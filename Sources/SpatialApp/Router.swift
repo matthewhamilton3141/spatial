@@ -119,10 +119,12 @@ final class Router {
     private var tapped: [AudioObjectID] = []
     private var outputDevice = AudioObjectID(kAudioObjectUnknown)
     private var listeners: [(AudioObjectPropertySelector, AudioObjectPropertyListenerBlock)] = []
-    /// Watches the current output's sample rate: if it changes under us
-    /// (another app, or a spatial-mode switch reconfiguring the AirPods),
-    /// the tap and the player disagree on time until we rebuild.
-    private var rateListener: (AudioObjectID, AudioObjectPropertyListenerBlock)?
+    /// Watches the current output (and our private device) for changes a
+    /// spatial-mode switch can cause. Sample rate or stream layout changing
+    /// means the tap and the player disagree until the tap is rebuilt;
+    /// latency changing moves the player's "too late" line.
+    private var deviceListeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
+    private var lastOverloadLog = Date.distantPast
     private var pending: DispatchWorkItem?
     private var enabled = false
 
@@ -302,16 +304,33 @@ final class Router {
             DispatchQueue.main.asyncAfter(deadline: .now() + 6) { capture.start(rate: rate) }
         }
 
-        let rateBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            if args.contains("--log") {
-                FileHandle.standardError.write("output sample rate changed to \(Int(CA.sampleRate(output))) Hz: rebuilding\n".data(using: .utf8)!)
-            }
+        let out = kAudioObjectPropertyScopeOutput
+        listen(output, CA.address(kAudioDevicePropertyNominalSampleRate)) { [weak self] in
+            Self.event("output sample rate changed to \(Int(CA.sampleRate(output))) Hz: rebuilding the tap")
             self?.refreshSoon(force: true)
         }
-        var rateAddress = CA.address(kAudioDevicePropertyNominalSampleRate)
-        AudioObjectAddPropertyListenerBlock(output, &rateAddress, .main, rateBlock)
-        rateListener = (output, rateBlock)
+        let builtAt = Date()
+        listen(output, CA.address(kAudioDevicePropertyStreamConfiguration, out)) { [weak self] in
+            // Settling right after a build isn't a change; never loop on it.
+            guard Date().timeIntervalSince(builtAt) > 2 else { Self.event("output streams settled after build"); return }
+            Self.event("output streams changed: rebuilding the tap")
+            self?.refreshSoon(force: true)
+        }
+        for selector in [kAudioDevicePropertyLatency, kAudioDevicePropertySafetyOffset, kAudioDevicePropertyBufferFrameSize] {
+            let scope = selector == kAudioDevicePropertyBufferFrameSize ? kAudioObjectPropertyScopeGlobal : out
+            listen(output, CA.address(selector, scope)) { [weak self] in
+                self?.player.setOutputLatency(CA.latency(of: output))
+            }
+        }
+        // Overloads: our IO thread missed a deadline, i.e. a gap or a burst
+        // in what the tap delivers. Logged only (rate-limited).
+        listen(deviceID, CA.address(kAudioDeviceProcessorOverload)) { [weak self] in
+            guard let self, Date().timeIntervalSince(self.lastOverloadLog) > 0.5 else { return }
+            self.lastOverloadLog = Date()
+            Self.event("tap device overload")
+        }
 
+        Self.event(String(format: "tap built on %@, %.0f Hz, output latency %.0f ms", CA.name(output), rate, CA.latency(of: output) * 1000))
         tapped = targets
         outputDevice = output
         state = .running(device: CA.name(output), rate: rate, kind: kind)
@@ -334,12 +353,30 @@ final class Router {
         return Int(buffers[0].mDataByteSize) / (MemoryLayout<Float>.size * max(1, Int(buffers[0].mNumberChannels)))
     }
 
+    private func listen(_ object: AudioObjectID, _ address: AudioObjectPropertyAddress, _ action: @escaping () -> Void) {
+        var address = address
+        let block: AudioObjectPropertyListenerBlock = { _, _ in action() }
+        guard AudioObjectAddPropertyListenerBlock(object, &address, .main, block) == noErr else { return }
+        deviceListeners.append((object, address, block))
+    }
+
+    private static let clock: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f
+    }()
+
+    static func event(_ line: String) {
+        guard args.contains("--log") else { return }
+        FileHandle.standardError.write("\(clock.string(from: Date())) EVENT \(line)\n".data(using: .utf8)!)
+    }
+
     private func teardown() {
-        if let (device, block) = rateListener {
-            var address = CA.address(kAudioDevicePropertyNominalSampleRate)
-            AudioObjectRemovePropertyListenerBlock(device, &address, .main, block)
-            rateListener = nil
+        for (object, address, block) in deviceListeners {
+            var address = address
+            AudioObjectRemovePropertyListenerBlock(object, &address, .main, block)
         }
+        deviceListeners.removeAll()
         player.stop()
         if deviceID != kAudioObjectUnknown {
             if let procID {

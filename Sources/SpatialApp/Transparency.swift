@@ -44,6 +44,12 @@ func runTransparencyTest() -> Bool {
                 player.ring.write(left: l.baseAddress! + fed, right: r.baseAddress! + fed, frames: n)
             } }
             fed += n
+            // `--simulate`: a configuration change at 4 s, an automatic
+            // flush at 8 s, to check both are handled without a click.
+            if args.contains("--simulate") {
+                if fed >= Int(4 * rate), fed - n < Int(4 * rate) { player.simulateConfigurationChange() }
+                if fed >= Int(8 * rate), fed - n < Int(8 * rate) { player.simulateAutomaticFlush() }
+            }
         }
     }
     print(String(format: "player: queued %.0f ms, failed: %@, live peak %.3f", player.queuedAhead * 1000,
