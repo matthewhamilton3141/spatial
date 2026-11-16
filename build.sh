@@ -2,8 +2,10 @@
 # Builds Spatial.app. Needs only the Command Line Tools (no Xcode).
 #   ./build.sh          build
 #   ./build.sh run      build and open
+#   ./build.sh release  build and pack build/Spatial.zip for a GitHub release
 set -e
 cd "$(dirname "$0")"
+VERSION=1.0
 
 swift build -c release
 
@@ -25,7 +27,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/Spatial "$APP/Contents/MacOS/Spatial"
 cp "$ICNS" "$APP/Contents/Resources/Spatial.icns"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -35,8 +37,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key><string>Spatial</string>
     <key>CFBundleIconFile</key><string>Spatial</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>$VERSION</string>
+    <key>CFBundleVersion</key><string>$VERSION</string>
     <key>LSMinimumSystemVersion</key><string>15.0</string>
     <key>LSUIElement</key><true/>
     <key>NSAudioCaptureUsageDescription</key>
@@ -48,6 +50,14 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 
 codesign --force --sign - "$APP" >/dev/null 2>&1
-echo "Built $APP"
+echo "Built $APP ($VERSION)"
 
 if [ "$1" = "run" ]; then open "$APP"; fi
+
+# A fixed asset name keeps .../releases/latest/download/Spatial.zip working.
+if [ "$1" = "release" ]; then
+    ZIP=build/Spatial.zip
+    rm -f "$ZIP"
+    ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+    echo "Packed $ZIP ($(du -h "$ZIP" | cut -f1)), sha256 $(shasum -a 256 "$ZIP" | cut -d' ' -f1)"
+fi
