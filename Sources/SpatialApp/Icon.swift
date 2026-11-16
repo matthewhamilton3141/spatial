@@ -1,29 +1,39 @@
 import AppKit
 
-/// Spatial's mark: two concentric circles.
+/// Spatial's mark: a 5 × 5 grid of dots turned 45° into a diamond, each dot
+/// smaller the farther it sits from the middle, like sound fading out.
 /// Shared by the menu bar glyph and the app icon (scripts/make-icon builds
 /// the .icns from this same file).
 enum SpatialIcon {
-    /// Draws the mark centred in `rect`. `weight` is the stroke and `inner`
-    /// the inner circle's radius, both relative to the mark's size.
-    static func drawMark(in rect: CGRect, color: NSColor, weight: CGFloat, inner: CGFloat = 0.5) {
+    /// Draws the mark centred in `rect`, tip to tip across its shorter side.
+    /// `center` and `edge` are the radii of the middle dot and the four tip
+    /// dots, as fractions of the spacing between neighbouring dots.
+    static func drawMark(in rect: CGRect, color: NSColor, center: CGFloat, edge: CGFloat) {
         let size = min(rect.width, rect.height)
-        let c = CGPoint(x: rect.midX, y: rect.midY)
-        let stroke = size * weight
-        color.setStroke()
-        let outer = size / 2 - stroke / 2
-        for r in [outer, outer * inner] {
-            let ring = NSBezierPath(ovalIn: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2))
-            ring.lineWidth = stroke
-            ring.stroke()
+        let mid = CGPoint(x: rect.midX, y: rect.midY)
+        // Grid point (i, j) sits at ((i - j)h, (i + j)h): the tips are 4h
+        // out from the middle and neighbours are h√2 apart.
+        let root2 = CGFloat(2).squareRoot()
+        let h = size / (8 + 2 * edge * root2)
+        let spacing = h * root2
+        let farthest = 2 * root2                     // the tips, at grid (±2, ±2)
+        color.setFill()
+        for i in -2...2 {
+            for j in -2...2 {
+                let t = CGFloat(i * i + j * j).squareRoot() / farthest   // 0 middle ... 1 tips
+                let r = spacing * (center + (edge - center) * t)
+                let p = CGPoint(x: mid.x + CGFloat(i - j) * h, y: mid.y + CGFloat(i + j) * h)
+                NSBezierPath(ovalIn: CGRect(x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r)).fill()
+            }
         }
     }
 
     /// The menu bar glyph: an 18 pt template image, drawn as vectors so it
-    /// is crisp at any scale.
+    /// is crisp at any scale. The tips stay a little bigger than on the app
+    /// icon so they survive at menu bar size.
     static func menuBarImage() -> NSImage {
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
-            drawMark(in: rect.insetBy(dx: 2.2, dy: 2.2), color: .black, weight: 0.11, inner: 0.48)
+            drawMark(in: rect.insetBy(dx: 1, dy: 1), color: .black, center: 0.40, edge: 0.17)
             return true
         }
         image.isTemplate = true
@@ -68,7 +78,7 @@ enum SpatialIcon {
         rim.lineWidth = max(1, 3 * s)
         rim.stroke()
 
-        drawMark(in: tile.insetBy(dx: 240.5 * s, dy: 240.5 * s), color: .white, weight: 0.07, inner: 0.5)
+        drawMark(in: tile.insetBy(dx: 150 * s, dy: 150 * s), color: .white, center: 0.42, edge: 0.12)
         return rep
     }
 }
