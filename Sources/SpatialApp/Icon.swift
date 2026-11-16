@@ -42,8 +42,7 @@ enum SpatialIcon {
     }
 
     /// The app icon at `pixels` square, on the macOS icon grid: an 824/1024
-    /// rounded square with a soft shadow, black with a faint top light,
-    /// the mark in white.
+    /// rounded square with a soft shadow, black, the mark in white.
     static func appIcon(pixels: Int) -> NSBitmapImageRep {
         let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
                                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
@@ -68,9 +67,9 @@ enum SpatialIcon {
         shape.fill()
         NSGraphicsContext.restoreGraphicsState()
 
-        // Body: near-black with a faint light from the top.
-        NSGradient(starting: NSColor(white: 0.20, alpha: 1), ending: NSColor(white: 0.04, alpha: 1))!
-            .draw(in: shape, angle: -90)
+        // Body: plain black.
+        NSColor.black.setFill()
+        shape.fill()
         // Hairline rim so it reads on a black Dock.
         NSColor(white: 1, alpha: 0.12).setStroke()
         let rim = NSBezierPath(roundedRect: tile.insetBy(dx: 1.5 * s, dy: 1.5 * s),
