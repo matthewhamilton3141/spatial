@@ -129,7 +129,6 @@ final class Router {
     private var enabled = false
 
     var headTracking = HeadTracking.off { didSet { engine.setHeadTracking(headTracking) } }
-    var room = false { didSet { engine.setRoom(room) } }
 
     init(engine kind: EngineKind) {
         engine = makeEngine(kind)
@@ -258,7 +257,6 @@ final class Router {
         let kind = CA.kind(of: output)
         try engine.prepare(sampleRate: rate, output: kind)
         engine.setHeadTracking(headTracking)
-        engine.setRoom(room)
         let ring: Ring? = engine.kind.rendersItself ? nil : player.ring
         if ring != nil { try player.start(sampleRate: rate, outputLatency: CA.latency(of: output), deviceUID: outputUID) }
 

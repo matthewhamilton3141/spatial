@@ -56,7 +56,6 @@ func runSmokeTest() -> Bool {
             check("\(tag): engine starts", true,
                   kind == .mixer ? "personal profile: \(engine.usingPersonalProfile.map { $0 ? "yes" : "no" } ?? "unknown")" : "")
             engine.setHeadTracking(.off)
-            engine.setRoom(false)
 
             let left = run(engine, rate: rate, seconds: 1) { _ in (noise(0), 0) }
             check("\(tag): left-only input stays on the left", left.finite && left.l > left.r * 1.25,
@@ -84,22 +83,6 @@ func runSmokeTest() -> Bool {
                   String(format: "yaw +90° -> %.1f dB toward the %@ ear", abs(shift), shift > 0 ? "left" : "right"))
             engine.setHeadPose(HeadPose())
             engine.setHeadTracking(.off)
-
-            // Room: a short burst, then listen to the tail.
-            func tail(_ room: Bool) -> Float {
-                engine.setRoom(room)
-                _ = run(engine, rate: rate, seconds: 0.5, skip: 0.5) { _ in (0, 0) }   // flush
-                let burst = Int(0.05 * rate)
-                let r = run(engine, rate: rate, seconds: 0.65, skip: 0.15) { i in
-                    i < burst ? (noise(0), noise(0)) : (0, 0)
-                }
-                return max(r.l, r.r)
-            }
-            if kind.hasRoom {
-                let dry = tail(false), wet = tail(true)
-                check("\(tag): Room adds a tail", wet > dry * 2 && wet > 1e-4, "dry \(db(dry)), room \(db(wet))")
-                engine.setRoom(false)
-            }
         }
     }
 

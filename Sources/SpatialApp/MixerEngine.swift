@@ -157,9 +157,6 @@ final class MixerEngine: SpatialEngine {
         AudioUnitSetParameter(unit, kSpatialMixerParam_HeadRoll, kAudioUnitScope_Global, 0, pose.roll, 0)
     }
 
-    /// Not offered for this engine; see prepare().
-    func setRoom(_ on: Bool) {}
-
     private func applyHeadTracking() {
         guard let unit else { return }
         var on: UInt32 = headTracking == .builtIn ? 1 : 0

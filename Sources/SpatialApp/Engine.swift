@@ -10,13 +10,7 @@ enum EngineKind: String, CaseIterable {
     /// iPhone. The song becomes a far-field bed around you; AirPods head
     /// tracking and your personalized profile are built in.
     case mixer
-    /// AVAudioEnvironmentNode: two virtual speakers in front of you at ±30°,
-    /// each a point source rendered with HRTF. Head tracking comes from
-    /// CoreMotion. A more "speakers in a room" sound.
-    case speakers
 
-    /// Only the 3D engine has a room; Apple's renderer is dry by design.
-    var hasRoom: Bool { self == .speakers }
     /// Whether this app renders the spatial sound (vs macOS doing it).
     var rendersItself: Bool { self != .system }
 
@@ -24,7 +18,6 @@ enum EngineKind: String, CaseIterable {
         switch self {
         case .system: return "System (AirPods Menu)"
         case .mixer: return "Apple Spatial Mixer"
-        case .speakers: return "Virtual Speakers (3D engine)"
         }
     }
 }
@@ -34,7 +27,7 @@ enum HeadTracking: String, CaseIterable {
     /// The mixer reads the AirPods itself. Only the mixer engine has this.
     case builtIn
     /// We read the AirPods through CMHeadphoneMotionManager and turn the
-    /// listener ourselves. Works with either engine.
+    /// listener ourselves.
     case motion
 
     var title: String {
@@ -65,7 +58,6 @@ protocol SpatialEngine: AnyObject {
                 frames: Int)
     func setHeadTracking(_ mode: HeadTracking)
     func setHeadPose(_ pose: HeadPose)
-    func setRoom(_ on: Bool)
     /// True once Apple confirms your personal spatial audio profile is in
     /// use, false if it fell back to the generic one, nil if unknowable.
     var usingPersonalProfile: Bool? { get }
@@ -79,7 +71,6 @@ func makeEngine(_ kind: EngineKind) -> SpatialEngine {
     switch kind {
     case .system: return PassthroughEngine()
     case .mixer: return MixerEngine()
-    case .speakers: return SpeakersEngine()
     }
 }
 
@@ -95,5 +86,4 @@ final class PassthroughEngine: SpatialEngine {
     }
     func setHeadTracking(_ mode: HeadTracking) {}
     func setHeadPose(_ pose: HeadPose) {}
-    func setRoom(_ on: Bool) {}
 }

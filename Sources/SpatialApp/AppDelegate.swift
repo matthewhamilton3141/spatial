@@ -16,10 +16,6 @@ struct Settings {
         get { HeadTracking(rawValue: d.string(forKey: "headTracking") ?? "") ?? .builtIn }
         set { d.set(newValue.rawValue, forKey: "headTracking") }
     }
-    static var room: Bool {
-        get { d.bool(forKey: "room") }
-        set { d.set(newValue, forKey: "room") }
-    }
     /// The menu bar icon is hidden; opening Spatial again brings it back.
     static var iconHidden: Bool {
         get { d.bool(forKey: "iconHidden") }
@@ -27,7 +23,7 @@ struct Settings {
     }
 }
 
-/// A menu bar item: Spatial Audio on/off, engine, head tracking, room.
+/// A menu bar item: Spatial Audio on/off, engine, head tracking.
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var item: NSStatusItem!
     private let router = Router(engine: Settings.engine)
@@ -55,7 +51,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         router.onChange = { [weak self] in self?.refreshIcon() }
         router.headTracking = Settings.headTracking
-        router.room = Settings.room
         router.setEnabled(Settings.enabled)
         updateMotion()
 
@@ -119,8 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// CoreMotion drives the listener unless the mixer is tracking by itself.
     private func updateMotion() {
-        let wants = Settings.enabled && Settings.engine.rendersItself && (Settings.headTracking == .motion ||
-                                         (Settings.headTracking == .builtIn && Settings.engine == .speakers))
+        let wants = Settings.enabled && Settings.engine.rendersItself && Settings.headTracking == .motion
         if wants {
             motion.start { [weak self] pose in self?.router.engine.setHeadPose(pose) }
         } else {
@@ -133,6 +127,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
 
+        // The master switch. Off hands Spotify straight back to your
+        // headphones: no reroute, no extra delay, exactly as without Spatial.
+        let toggle = NSMenuItem(title: "Spatial Audio", action: #selector(toggleEnabled), keyEquivalent: "s")
+        toggle.state = Settings.enabled ? .on : .off
+        toggle.target = self
+        menu.addItem(toggle)
         menu.addItem(disabled(statusLine()))
         if let personal = router.engine.usingPersonalProfile, case .running(_, _, .headphones) = router.state {
             menu.addItem(disabled(personal ? "Using your personalized profile" : "Using the generic profile"))
@@ -141,25 +141,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(disabled("No sound arriving: allow Spatial under"))
             menu.addItem(disabled("Privacy & Security › Screen & System Audio Recording"))
         }
-        menu.addItem(.separator())
-
-        let toggle = NSMenuItem(title: "Reroute Spotify", action: #selector(toggleEnabled), keyEquivalent: "s")
-        toggle.state = Settings.enabled ? .on : .off
-        toggle.target = self
-        menu.addItem(toggle)
-
-        if !Settings.engine.rendersItself {
-            menu.addItem(disabled("Spatial Audio and head tracking: AirPods"))
-            menu.addItem(disabled("menu in Control Center"))
+        if Settings.enabled, !Settings.engine.rendersItself {
+            menu.addItem(disabled("Fixed or Head Tracked: Control Center"))
+            menu.addItem(disabled("› your AirPods › Spatial Audio"))
         }
+        menu.addItem(.separator())
 
         let head = NSMenuItem(title: "Head Tracking", action: nil, keyEquivalent: "")
         let headMenu = NSMenu()
         for mode in HeadTracking.allCases {
-            if mode == .builtIn && Settings.engine == .speakers { continue }
             let m = NSMenuItem(title: mode.title, action: #selector(pickHead(_:)), keyEquivalent: "")
             m.representedObject = mode.rawValue
-            m.state = effectiveHead == mode ? .on : .off
+            m.state = Settings.headTracking == mode ? .on : .off
             m.target = self
             headMenu.addItem(m)
         }
@@ -170,13 +163,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         headMenu.addItem(recenter)
         head.submenu = headMenu
         if Settings.engine.rendersItself { menu.addItem(head) }
-
-        if Settings.engine.hasRoom {
-            let room = NSMenuItem(title: "Room", action: #selector(toggleRoom), keyEquivalent: "")
-            room.state = Settings.room ? .on : .off
-            room.target = self
-            menu.addItem(room)
-        }
 
         let engine = NSMenuItem(title: "Engine", action: nil, keyEquivalent: "")
         let engineMenu = NSMenu()
@@ -199,14 +185,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(NSMenuItem(title: "Quit Spatial", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
 
-    /// The speakers engine has no built-in tracking; it shows as motion there.
-    private var effectiveHead: HeadTracking {
-        Settings.headTracking == .builtIn && Settings.engine == .speakers ? .motion : Settings.headTracking
-    }
-
     private func statusLine() -> String {
         switch router.state {
-        case .off: return "Off"
+        case .off: return "Off: Spotify plays as usual"
         case .waiting: return "Waiting for Spotify"
         case let .running(device, rate, _): return "Spotify → \(device) · \(Int(rate / 1000)) kHz"
         case let .failed(why): return "Couldn't start: \(why)"
@@ -239,17 +220,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.isVisible = false
     }
 
-    @objc private func toggleRoom() {
-        Settings.room.toggle()
-        router.room = Settings.room
-    }
-
     @objc private func pickEngine(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let kind = EngineKind(rawValue: raw) else { return }
         Settings.engine = kind
         router.setEngine(kind)
         router.headTracking = Settings.headTracking
-        router.room = Settings.room
         updateMotion()
     }
 }
