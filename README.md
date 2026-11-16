@@ -23,16 +23,32 @@ Personalized Spatial Audio profile if you've set one up.
 
 ## Install
 
-1. [Download Spatial.zip](https://github.com/matthewhamilton3141/spatial/releases/latest/download/Spatial.zip), unzip it, and drag **Spatial** into Applications.
-2. Open it. Spatial isn't notarized by Apple yet, so macOS blocks the first launch. Go to
-   **System Settings › Privacy & Security**, scroll down, and click **Open Anyway**.
-   (Or, in Terminal: `xattr -dr com.apple.quarantine /Applications/Spatial.app`.)
-3. Play something in Spotify. When macOS asks, allow **System Audio Recording**. That's how
-   Spatial takes Spotify's sound. Nothing is recorded, saved, or sent anywhere.
-4. Open **Control Center › your AirPods › Spatial Audio** and pick **Fixed** or **Head Tracked**.
+Paste this into Terminal:
 
-Spatial lives in the menu bar (the dotted diamond). Turn off **Reroute Spotify** or quit Spatial,
-and Spotify plays exactly as before.
+```sh
+curl -fsSL https://raw.githubusercontent.com/matthewhamilton3141/spatial/main/install.sh | sh
+```
+
+It downloads the latest release, puts Spatial in Applications, and opens it. A copy that
+arrives through curl isn't quarantined, so there's no Open Anyway step. (Options:
+`SPATIAL_INSTALL_DIR=~/Applications` or `SPATIAL_NO_OPEN=1` in front of `sh`. The script
+is [install.sh](install.sh).)
+
+Then:
+
+1. Play something in Spotify. When macOS asks, allow **System Audio Recording**. That's how
+   Spatial takes Spotify's sound. Nothing is recorded, saved, or sent anywhere.
+2. Open **Control Center › your AirPods › Spatial Audio** and pick **Fixed** or **Head Tracked**.
+
+**Or by hand:** [download Spatial.zip](https://github.com/matthewhamilton3141/spatial/releases/latest/download/Spatial.zip),
+unzip it, and drag **Spatial** into Applications. Spatial isn't notarized by Apple yet, so
+macOS blocks a downloaded copy the first time: go to **System Settings › Privacy & Security**,
+scroll down, and click **Open Anyway**.
+
+**Uninstall:** choose Quit Spatial in its menu and drag it to the Trash.
+
+Spatial lives in the menu bar (the dotted diamond). Its **Spatial Audio** switch (⌘S) turns
+it off, and Spotify goes straight back to normal: no reroute, no extra delay.
 
 ## Good to know
 
@@ -66,10 +82,9 @@ Spatial does no processing of its own in this mode. It keeps about 0.3 s of audi
 (the AirPods' Bluetooth latency plus headroom for clock jitter) and handles the renderer
 reconfiguring itself when you switch modes.
 
-The **Engine** menu also has two renderers of Spatial's own, for experimenting:
-**Apple Spatial Mixer** (`AUSpatialMixer`, the renderer behind Spatialize Stereo, driven
-directly) and **Virtual Speakers** (`AVAudioEnvironmentNode`, two HRTF sources at ±30°,
-optional room). Both support head tracking but skip the Control Center menu.
+The **Engine** menu also has a renderer of Spatial's own, for experimenting: **Apple
+Spatial Mixer** (`AUSpatialMixer`, the renderer behind Spatialize Stereo, driven directly).
+It does head tracking itself and skips the Control Center menu.
 
 ## Build from source
 
