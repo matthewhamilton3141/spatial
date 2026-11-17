@@ -29,8 +29,18 @@ say() { printf '%s\n' "$*"; }
 die() { printf 'spatial: %s\n' "$*" >&2; exit 1; }
 
 tmp=""
+sudo=""
+dest=""
+staged=""   # the new copy, next to the destination until it's swapped in
+old=""      # the previous Spatial.app, moved aside until the swap succeeds
 cleanup() {
     if [ -n "$tmp" ]; then rm -rf "$tmp"; fi
+    # Interrupted (Ctrl-C, Terminal closed) or failed partway: never leave a
+    # half-copied app behind, and put the previous version back.
+    if [ -n "$staged" ] && [ -e "$staged" ]; then $sudo rm -rf "$staged"; fi
+    if [ -n "$old" ] && [ -e "$old" ]; then
+        if [ -e "$dest" ]; then $sudo rm -rf "$old"; else $sudo mv "$old" "$dest"; fi
+    fi
 }
 
 main() {
@@ -87,7 +97,6 @@ main() {
     # --- Install ----------------------------------------------------------
     # /Applications is writable by admin accounts. Anyone else goes through
     # sudo, and the copy is handed back to them afterwards.
-    sudo=""
     mkdir -p "$dest_dir" 2>/dev/null || true
     if [ ! -w "$dest_dir" ] || { [ -e "$dest" ] && [ ! -w "$dest" ]; }; then
         say "$dest_dir isn't writable by $(id -un); asking for your password"
@@ -95,18 +104,22 @@ main() {
         $sudo mkdir -p "$dest_dir"
     fi
 
-    old=""
+    # Copy next to the destination first, then swap with two renames: an
+    # interruption leaves either the old app or the new one, never half of
+    # one (cleanup() removes the leftovers).
+    staged="$dest_dir/.Spatial-new-$$.app"
+    $sudo rm -rf "$staged"
+    $sudo ditto "$src" "$staged" \
+        || die "copying Spatial into $dest_dir failed; nothing was changed."
+    if [ -n "$sudo" ]; then $sudo chown -R "$(id -u):$(id -g)" "$staged"; fi
     if [ -e "$dest" ]; then
         old="$dest_dir/.Spatial-previous-$$.app"
         $sudo mv "$dest" "$old"
     fi
-    if ! $sudo ditto "$src" "$dest"; then
-        $sudo rm -rf "$dest"
-        if [ -n "$old" ]; then $sudo mv "$old" "$dest"; fi
-        die "copying Spatial into $dest_dir failed; nothing was changed."
-    fi
-    if [ -n "$old" ]; then $sudo rm -rf "$old"; fi
-    if [ -n "$sudo" ]; then $sudo chown -R "$(id -u):$(id -g)" "$dest"; fi
+    $sudo mv "$staged" "$dest" \
+        || die "couldn't put Spatial into $dest_dir; nothing was changed."
+    staged=""
+    if [ -n "$old" ]; then $sudo rm -rf "$old"; old=""; fi
 
     # Nothing above sets the flag; this only makes sure of it.
     xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true

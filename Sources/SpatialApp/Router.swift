@@ -18,25 +18,26 @@ final class Scratch {
         for p in [inLeft, inRight, outLeft, outRight, peak] { p.deallocate() }
     }
 
-    /// Copies `frames` frames starting at `offset` from the tap into inLeft/inRight.
-    func read(_ list: UnsafePointer<AudioBufferList>, offset: Int, frames: Int) {
+    /// Copies `frames` frames starting at `offset` from input buffer `stream`
+    /// (the tap's) into inLeft/inRight.
+    func read(_ list: UnsafePointer<AudioBufferList>, stream: Int = 0, offset: Int, frames: Int) {
         let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: list))
         var loudest = peak.pointee
         defer { peak.pointee = loudest }
-        guard buffers.count > 0, let first = buffers[0].mData?.assumingMemoryBound(to: Float.self) else {
+        guard buffers.count > stream, let first = buffers[stream].mData?.assumingMemoryBound(to: Float.self) else {
             inLeft.update(repeating: 0, count: frames)
             inRight.update(repeating: 0, count: frames)
             return
         }
-        let channels = Int(buffers[0].mNumberChannels)
-        let available = Int(buffers[0].mDataByteSize) / (MemoryLayout<Float>.size * max(1, channels))
+        let channels = Int(buffers[stream].mNumberChannels)
+        let available = Int(buffers[stream].mDataByteSize) / (MemoryLayout<Float>.size * max(1, channels))
         let n = max(0, min(frames, available - offset))
         if channels >= 2 {
             for i in 0..<n {
                 inLeft[i] = first[(offset + i) * channels]
                 inRight[i] = first[(offset + i) * channels + 1]
             }
-        } else if buffers.count >= 2, let second = buffers[1].mData?.assumingMemoryBound(to: Float.self) {
+        } else if buffers.count > stream + 1, let second = buffers[stream + 1].mData?.assumingMemoryBound(to: Float.self) {
             inLeft.update(from: first + offset, count: n)
             inRight.update(from: second + offset, count: n)
         } else {
@@ -94,6 +95,8 @@ final class Router {
         case off
         case waiting                      // the target app isn't playing through Core Audio
         case running(device: String, rate: Double, kind: OutputKind)
+        case needsPermission              // System Audio Recording was denied
+        case airPlay(device: String)      // left alone: no Spatial Audio menu there
         case failed(String)
     }
 
@@ -118,20 +121,28 @@ final class Router {
     private var procID: AudioDeviceIOProcID?
     private var tapped: [AudioObjectID] = []
     private var outputDevice = AudioObjectID(kAudioObjectUnknown)
-    private var listeners: [(AudioObjectPropertySelector, AudioObjectPropertyListenerBlock)] = []
+    private var listeners: [PropertyListener] = []
     /// Watches the current output (and our private device) for changes a
     /// spatial-mode switch can cause. Sample rate or stream layout changing
     /// means the tap and the player disagree until the tap is rebuilt;
     /// latency changing moves the player's "too late" line.
-    private var deviceListeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
+    private var deviceListeners: [PropertyListener] = []
     private var lastOverloadLog = Date.distantPast
     private var pending: DispatchWorkItem?
+    /// Whether the pending refresh has to rebuild even if nothing it can
+    /// see changed (sample rate, stream layout). Sticky until it runs, so
+    /// a later ordinary notification can't cancel a needed rebuild.
+    private var pendingForce = false
+    /// Builds that failed in a row; a few are retried (devices that are
+    /// still setting up, AirPods mid-connect).
+    private var failedBuilds = 0
     private var enabled = false
 
     var headTracking = HeadTracking.off { didSet { engine.setHeadTracking(headTracking) } }
 
     init(engine kind: EngineKind) {
         engine = makeEngine(kind)
+        CA.allowIdleSleep()
     }
 
     deinit {
@@ -141,6 +152,7 @@ final class Router {
 
     func setEnabled(_ on: Bool) {
         enabled = on
+        failedBuilds = 0
         if on { watch() } else { unwatch() }
         refresh(force: true)
     }
@@ -149,7 +161,24 @@ final class Router {
         guard kind != engine.kind else { return }
         teardown()
         engine = makeEngine(kind)
+        failedBuilds = 0
         refresh(force: true)
+    }
+
+    /// Re-reads the System Audio Recording permission. Denied while running:
+    /// drop the tap, since a muted tap that hears nothing silences Spotify.
+    /// Granted while waiting on it: start.
+    func checkPermission() {
+        let status = AudioCapturePermission.status
+        switch state {
+        case .needsPermission where status != .denied:
+            refresh(force: true)
+        case .running where status == .denied:
+            teardown()
+            state = .needsPermission
+        default:
+            break
+        }
     }
 
     /// Loudest sample since the last call (0...1).
@@ -166,12 +195,19 @@ final class Router {
     // MARK: Deciding when to (re)build
 
     private func refresh(force: Bool = false) {
+        // Whatever was pending is covered by this.
+        pending?.cancel()
+        pending = nil
+        pendingForce = false
         guard enabled else {
             teardown()
             state = .off
             return
         }
-        let targets = CA.processes().filter { $0.bundleID.hasPrefix(target) }.map(\.object).sorted()
+        // Never tap ourselves (a `target` prefix that matches Spatial would
+        // feed its own output back in).
+        let me = getpid()
+        let targets = CA.processes().filter { $0.bundleID.hasPrefix(target) && $0.pid != me }.map(\.object).sorted()
         guard !targets.isEmpty, let output = CA.defaultOutput() else {
             teardown()
             state = .waiting
@@ -179,18 +215,48 @@ final class Router {
         }
         if !force, targets == tapped, output == outputDevice, procID != nil { return }
         teardown()
+        // AirPlay buffers about 2 s and has no Spatial Audio menu: rerouting
+        // there would only add delay (or, past the player's limits, silence).
+        if !engine.kind.rendersItself, CA.isAirPlay(output) {
+            state = .airPlay(device: CA.name(output))
+            return
+        }
+        // Denied: leave Spotify alone rather than mute it behind a tap that
+        // hears nothing, and say so in the menu.
+        guard AudioCapturePermission.status != .denied else {
+            state = .needsPermission
+            return
+        }
         do {
             try build(targets: targets, output: output)
+            failedBuilds = 0
+            // The first build is where macOS asks (Core Audio waits for the
+            // answer). Don't Allow: undo it straight away.
+            if AudioCapturePermission.status == .denied {
+                teardown()
+                state = .needsPermission
+            }
         } catch {
             teardown()
             state = .failed("\(error)")
+            failedBuilds += 1
+            if failedBuilds <= 3 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                    guard let self, case .failed = self.state else { return }
+                    self.refresh(force: true)
+                }
+            }
         }
     }
 
     /// Core Audio fires several notifications per change; settle first.
     private func refreshSoon(force: Bool = false) {
         pending?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.refresh(force: force) }
+        pendingForce = pendingForce || force
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.refresh(force: self.pendingForce)
+        }
         pending = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
@@ -198,20 +264,32 @@ final class Router {
     private func watch() {
         guard listeners.isEmpty else { return }
         for selector in [kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyProcessObjectList] {
-            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.refreshSoon() }
-            var address = CA.address(selector)
-            AudioObjectAddPropertyListenerBlock(CA.system, &address, .main, block)
-            listeners.append((selector, block))
+            if let listener = PropertyListener(CA.system, CA.address(selector), { [weak self] in self?.refreshSoon() }) {
+                listeners.append(listener)
+            }
+        }
+        // coreaudiod restarted (a crash, a driver install, `killall
+        // coreaudiod`): every object and listener of ours is gone and the
+        // tap with them. Start over from scratch.
+        if let listener = PropertyListener(CA.system, CA.address(kAudioHardwarePropertyServiceRestarted), { [weak self] in
+            guard let self, self.enabled else { return }
+            Self.event("coreaudiod restarted: rebuilding everything")
+            self.forgetDeadObjects()
+            self.unwatch()
+            self.watch()
+            CA.allowIdleSleep()
+            self.refresh(force: true)
+        }) {
+            listeners.append(listener)
         }
     }
 
     private func unwatch() {
-        for (selector, block) in listeners {
-            var address = CA.address(selector)
-            AudioObjectRemovePropertyListenerBlock(CA.system, &address, .main, block)
-        }
+        for listener in listeners { listener.remove() }
         listeners.removeAll()
         pending?.cancel()
+        pending = nil
+        pendingForce = false
     }
 
     // MARK: Tap -> engine -> output
@@ -246,6 +324,11 @@ final class Router {
             ]],
         ]
         try check(AudioHardwareCreateAggregateDevice(description as CFDictionary, &deviceID), "create device")
+        // Which input stream is the tap's: the output's own inputs (a USB
+        // headset's mic, an interface's line-in) come first, the tap last.
+        let inputStreams = CA.list(deviceID, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput).count
+        guard inputStreams > 0 else { throw AudioError("the tap has no stream") }
+        let tapStream = inputStreams - 1
 
         // 3. Render at the device's rate; the tap is resampled to it.
         var rate = CA.sampleRate(deviceID)
@@ -277,11 +360,11 @@ final class Router {
             let channels = outs.count > 0 ? max(1, Int(outs[0].mNumberChannels)) : 1
             let frames = outs.count > 0
                 ? Int(outs[0].mDataByteSize) / (MemoryLayout<Float>.size * channels)
-                : Self.inputFrames(input)
+                : Self.inputFrames(input, stream: tapStream)
             var offset = 0
             while offset < frames {
                 let n = min(maxFrames, frames - offset)
-                scratch.read(input, offset: offset, frames: n)
+                scratch.read(input, stream: tapStream, offset: offset, frames: n)
                 captureSlot.current?.record(left: scratch.inLeft, right: scratch.inRight, count: n)
                 if let ring {
                     ring.write(left: scratch.inLeft, right: scratch.inRight, frames: n)
@@ -296,6 +379,12 @@ final class Router {
                 for buffer in outs { if let d = buffer.mData { memset(d, 0, Int(buffer.mDataByteSize)) } }
             }
         }, "create renderer")
+        if tapStream > 0, let procID {
+            // Don't start inputs nobody reads (a headset's mic would light
+            // the mic indicator and ask for microphone access).
+            let status = CA.useOnlyInputStream(tapStream, of: deviceID, proc: procID)
+            Self.event("output has \(tapStream) input stream(s) of its own; reading stream \(tapStream), others off (\(status))")
+        }
         try check(AudioDeviceStart(deviceID, procID), "start renderer")
 
         if let capture {   // let the output settle first
@@ -345,17 +434,14 @@ final class Router {
         return true
     }
 
-    private static func inputFrames(_ list: UnsafePointer<AudioBufferList>) -> Int {
+    private static func inputFrames(_ list: UnsafePointer<AudioBufferList>, stream: Int) -> Int {
         let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: list))
-        guard buffers.count > 0 else { return 0 }
-        return Int(buffers[0].mDataByteSize) / (MemoryLayout<Float>.size * max(1, Int(buffers[0].mNumberChannels)))
+        guard buffers.count > stream else { return 0 }
+        return Int(buffers[stream].mDataByteSize) / (MemoryLayout<Float>.size * max(1, Int(buffers[stream].mNumberChannels)))
     }
 
     private func listen(_ object: AudioObjectID, _ address: AudioObjectPropertyAddress, _ action: @escaping () -> Void) {
-        var address = address
-        let block: AudioObjectPropertyListenerBlock = { _, _ in action() }
-        guard AudioObjectAddPropertyListenerBlock(object, &address, .main, block) == noErr else { return }
-        deviceListeners.append((object, address, block))
+        if let listener = PropertyListener(object, address, action) { deviceListeners.append(listener) }
     }
 
     private static let clock: DateFormatter = {
@@ -369,11 +455,21 @@ final class Router {
         FileHandle.standardError.write("\(clock.string(from: Date())) EVENT \(line)\n".data(using: .utf8)!)
     }
 
+    /// After a coreaudiod restart our object IDs are dead, and destroying
+    /// them by number could hit whatever has that number now. Just let go.
+    private func forgetDeadObjects() {
+        for listener in deviceListeners { listener.remove() }
+        deviceListeners.removeAll()
+        player.stop()
+        procID = nil
+        deviceID = AudioObjectID(kAudioObjectUnknown)
+        tapID = AudioObjectID(kAudioObjectUnknown)
+        tapped = []
+        outputDevice = AudioObjectID(kAudioObjectUnknown)
+    }
+
     private func teardown() {
-        for (object, address, block) in deviceListeners {
-            var address = address
-            AudioObjectRemovePropertyListenerBlock(object, &address, .main, block)
-        }
+        for listener in deviceListeners { listener.remove() }
         deviceListeners.removeAll()
         player.stop()
         if deviceID != kAudioObjectUnknown {

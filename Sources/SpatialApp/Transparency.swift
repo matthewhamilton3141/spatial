@@ -49,6 +49,9 @@ func runTransparencyTest() -> Bool {
             if args.contains("--simulate") {
                 if fed >= Int(4 * rate), fed - n < Int(4 * rate) { player.simulateConfigurationChange() }
                 if fed >= Int(8 * rate), fed - n < Int(8 * rate) { player.simulateAutomaticFlush() }
+                // `--fail`: the renderer "fails" at 10 s; it must be replaced
+                // and the sound come back.
+                if args.contains("--fail"), fed >= Int(10 * rate), fed - n < Int(10 * rate) { player.simulateFailure() }
             }
         }
     }

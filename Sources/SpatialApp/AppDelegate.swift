@@ -31,8 +31,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var silentSeconds = 0
     private var meter: Timer?
     private var monitor: OutputMonitor?
+    private var launchedAsLoginItem = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // AppKit calls this while it handles the launch Apple event, the only
+        // time that event (and whether it came from Login Items) is readable.
+        let event = NSAppleEventManager.shared().currentAppleEvent
+        launchedAsLoginItem = event?.eventID == kAEOpenApplication
+            && event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
         // The null test runs inside a launched app: macOS only grants audio
         // capture to a properly launched app, otherwise the tap hears silence.
         if args.contains("--transparency") {
@@ -42,6 +48,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             return
         }
+        // One Spatial at a time: two would each tap Spotify and play it
+        // twice, a few ms apart. The newest launch wins, so opening a new
+        // copy (an update, or one from Downloads) replaces the old one.
+        let me = NSRunningApplication.current
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "local.spatial")
+            .filter { $0.processIdentifier != me.processIdentifier }
+        if others.contains(where: { ($0.launchDate ?? .distantPast) > (me.launchDate ?? .distantFuture) }) {
+            NSApp.terminate(nil)   // a newer one is starting up
+            return
+        }
+        for other in others { other.terminate() }   // quits cleanly, handing Spotify back
+        whenGone(others, deadline: Date().addingTimeInterval(3)) { [weak self] in self?.start() }
+    }
+
+    /// Waits for the old copies to quit (they take their taps with them),
+    /// forcing any that hang.
+    private func whenGone(_ apps: [NSRunningApplication], deadline: Date, then: @escaping () -> Void) {
+        let left = apps.filter { !$0.isTerminated }
+        if left.isEmpty { then(); return }
+        if Date() > deadline {
+            for app in left { app.forceTerminate() }
+            then()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.whenGone(left, deadline: deadline, then: then)
+        }
+    }
+
+    private func start() {
+        // Hidden is for "keep running out of sight". Opening Spatial yourself
+        // (after a restart, or an update) means you want to see it; only a
+        // login item launch keeps it hidden.
+        if Settings.iconHidden, !launchedAsLoginItem { Settings.iconHidden = false }
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = SpatialIcon.menuBarImage()
         item.isVisible = !Settings.iconHidden
@@ -90,6 +130,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             silentSeconds = 0
         }
+        // Spotify playing but nothing heard is what a denied permission
+        // looks like; while waiting on the permission, start once it's given.
+        if silentSeconds >= 2 || router.state == .needsPermission { router.checkPermission() }
         if args.contains("--log") {
             if monitor == nil, !args.contains("--no-monitor"), case .running = router.state {
                 let m = OutputMonitor()
@@ -134,10 +177,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         toggle.target = self
         menu.addItem(toggle)
         menu.addItem(disabled(statusLine()))
+        if router.state == .needsPermission {
+            let allow = NSMenuItem(title: "Allow in System Settings…", action: #selector(openPermissionSettings), keyEquivalent: "")
+            allow.target = self
+            menu.addItem(allow)
+        }
         if let personal = router.engine.usingPersonalProfile, case .running(_, _, .headphones) = router.state {
             menu.addItem(disabled(personal ? "Using your personalized profile" : "Using the generic profile"))
         }
-        if silentSeconds >= 3 {
+        // Silence alone is often just a pause; only point at the permission
+        // when macOS hasn't actually granted it.
+        if silentSeconds >= 3, AudioCapturePermission.status != .granted {
             menu.addItem(disabled("No sound arriving: allow Spatial under"))
             menu.addItem(disabled("Privacy & Security › Screen & System Audio Recording"))
         }
@@ -190,8 +240,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .off: return "Off: Spotify plays as usual"
         case .waiting: return "Waiting for Spotify"
         case let .running(device, rate, _): return "Spotify → \(device) · \(Int(rate / 1000)) kHz"
+        case .needsPermission: return "Needs System Audio Recording to hear Spotify"
+        case let .airPlay(device): return "\(device) is AirPlay: Spotify plays as usual"
         case let .failed(why): return "Couldn't start: \(why)"
         }
+    }
+
+    @objc private func openPermissionSettings() {
+        NSWorkspace.shared.open(AudioCapturePermission.settingsURL)
     }
 
     private func disabled(_ title: String) -> NSMenuItem {

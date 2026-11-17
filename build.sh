@@ -5,7 +5,7 @@
 #   ./build.sh release  build and pack build/Spatial.zip for a GitHub release
 set -e
 cd "$(dirname "$0")"
-VERSION=1.0
+VERSION=1.0.1
 
 swift build -c release
 

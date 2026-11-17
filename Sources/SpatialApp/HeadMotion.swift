@@ -4,15 +4,20 @@ import Foundation
 /// Reads AirPods head movement through CoreMotion and reports it relative to
 /// where you were facing at the start (or the last recenter).
 final class HeadMotion {
-    private let manager = CMHeadphoneMotionManager()
+    /// Made on first use only. Calling into CMHeadphoneMotionManager (even
+    /// to stop it) asks for Motion & Fitness permission, a second prompt on
+    /// first launch that the default engine, where macOS does the head
+    /// tracking, never needs.
+    private var manager: CMHeadphoneMotionManager?
     private var reference: CMAttitude?
     private var onPose: ((HeadPose) -> Void)?
 
-    var isAvailable: Bool { manager.isDeviceMotionAvailable }
-    var isRunning: Bool { manager.isDeviceMotionActive }
+    var isRunning: Bool { manager?.isDeviceMotionActive ?? false }
 
     func start(_ onPose: @escaping (HeadPose) -> Void) {
         self.onPose = onPose
+        let manager = self.manager ?? CMHeadphoneMotionManager()
+        self.manager = manager
         guard manager.isDeviceMotionAvailable, !manager.isDeviceMotionActive else { return }
         reference = nil
         manager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
@@ -33,7 +38,7 @@ final class HeadMotion {
     func recenter() { reference = nil }
 
     func stop() {
-        manager.stopDeviceMotionUpdates()
+        manager?.stopDeviceMotionUpdates()
         onPose?(HeadPose())
         onPose = nil
     }

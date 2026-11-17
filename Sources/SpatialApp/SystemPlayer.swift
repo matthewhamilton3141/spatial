@@ -71,8 +71,11 @@ final class Ring {
 /// at the same timestamps.
 final class SystemPlayer {
     let ring = Ring()
-    private let renderer = AVSampleBufferAudioRenderer()
-    private let synchronizer = AVSampleBufferRenderSynchronizer()
+    /// Replaced when it fails: `.failed` is terminal (Apple: "recovery is not
+    /// always possible"), and a flushed failed renderer just fails again.
+    private var renderer = AVSampleBufferAudioRenderer()
+    private var synchronizer = AVSampleBufferRenderSynchronizer()
+    private var lastReplaced = Date.distantPast
     private let queue = DispatchQueue(label: "spatial.system-player", qos: .userInteractive)
     private var timer: DispatchSourceTimer?
     private var format: CMAudioFormatDescription?
@@ -170,7 +173,20 @@ final class SystemPlayer {
         history.initialize(repeating: 0, count: Int(historyFrames) * 2)
         fadeFrom = .allocate(capacity: fadeInLength * 2)
         fadeFrom.initialize(repeating: 0, count: fadeInLength * 2)
+        configureRenderer()
+    }
+
+    /// Sets up the current renderer and synchronizer. In init, or on the
+    /// player's queue when replacing a failed pair.
+    private func configureRenderer() {
         renderer.allowedAudioSpatializationFormats = .monoStereoAndMultichannel
+        // When the AirPods change their buffering (switching to or from Head
+        // Tracked adds or removes ~80 ms), the renderer catches up by playing
+        // slower or faster for a few seconds (measured: the output drifts
+        // 70-95 ms against Spotify). Varispeed makes that a plain resample, a
+        // brief pitch dip that settles sooner; the default time-domain
+        // stretch warbles. Steady playback runs at rate 1 and is untouched.
+        renderer.audioTimePitchAlgorithm = .varispeed
         synchronizer.addRenderer(renderer)
         // Start the clock right away instead of waiting for the output to
         // wake up; otherwise that wait (~200 ms on AirPods) becomes
@@ -180,17 +196,28 @@ final class SystemPlayer {
         // Both notifications arrive on arbitrary threads; handle them on
         // the player's queue so they're serialized with enqueueing.
         let center = NotificationCenter.default
-        observers.append(center.addObserver(
-            forName: .AVSampleBufferAudioRendererOutputConfigurationDidChange,
-            object: renderer, queue: nil) { [weak self] _ in
+        for o in observers { center.removeObserver(o) }
+        observers = [
+            center.addObserver(forName: .AVSampleBufferAudioRendererOutputConfigurationDidChange,
+                               object: renderer, queue: nil) { [weak self] _ in
                 self?.queue.async { self?.outputConfigurationChanged() }
-            })
-        observers.append(center.addObserver(
-            forName: .AVSampleBufferAudioRendererWasFlushedAutomatically,
-            object: renderer, queue: nil) { [weak self] note in
+            },
+            center.addObserver(forName: .AVSampleBufferAudioRendererWasFlushedAutomatically,
+                               object: renderer, queue: nil) { [weak self] note in
                 let time = (note.userInfo?[AVSampleBufferAudioRendererFlushTimeKey] as? NSValue)?.timeValue
                 self?.queue.async { self?.flushedAutomatically(at: time) }
-            })
+            },
+        ]
+    }
+
+    /// Player queue: a fresh renderer and synchronizer for a failed pair.
+    private func replaceRenderer() {
+        synchronizer.setRate(0, time: .zero)
+        renderer.flush()
+        synchronizer.removeRenderer(renderer, at: .zero, completionHandler: nil)
+        renderer = AVSampleBufferAudioRenderer()
+        synchronizer = AVSampleBufferRenderSynchronizer()
+        configureRenderer()
     }
 
     deinit {
@@ -209,7 +236,7 @@ final class SystemPlayer {
     /// Underrun jumps and runaway skips so far (for the smoke test).
     var glitches: Int { queue.sync { underruns + runaways } }
 
-    var failed: Error? { renderer.status == .failed ? renderer.error : nil }
+    var failed: Error? { queue.sync { renderer.status == .failed ? renderer.error : nil } }
 
     func start(sampleRate: Double, outputLatency: Double = 0, deviceUID: String? = nil) throws {
         stop()
@@ -292,9 +319,16 @@ final class SystemPlayer {
         }
         measureSpeed()
         if reenqueuing { return }
-        if renderer.status == .failed {   // e.g. the output went away: start over
+        if renderer.status == .failed || pretendFailed {
+            // e.g. the output went away, or coreaudiod restarted. A failed
+            // renderer stays failed, so swap in a new one (at most once a
+            // second, so one that can't play right now isn't churned).
+            guard Date().timeIntervalSince(lastReplaced) > 1 else { return }
+            lastReplaced = Date()
+            pretendFailed = false
             failures += 1
-            event("renderer failed (\(renderer.error.map { "\($0)" } ?? "?")): starting over")
+            event("renderer failed (\(renderer.error.map { "\($0)" } ?? "?")): replacing it")
+            replaceRenderer()
             restartTimeline()
         }
         let rate = sampleRate
@@ -357,7 +391,7 @@ final class SystemPlayer {
                     windowStart = Date()
                 }
             }
-            if ahead > 1.5 {
+            if ahead > max(1.5, targetLead + cushion + 1) {
                 // Runaway drift only. What sits queued at steady state is
                 // what the renderer needs to cover output latency (about
                 // 110-300 ms on AirPods, measured); trimming it makes every
@@ -455,7 +489,7 @@ final class SystemPlayer {
         guard let format, let buffer = makeBuffer(frames: n, at: nextFrame, format: format) else { return false }
         if remember {
             for i in 0..<n {
-                let slot = Int((nextFrame + Int64(i)) % historyFrames) * 2
+                let slot = historySlot(nextFrame + Int64(i))
                 history[slot] = staging[i * 2]
                 history[slot + 1] = staging[i * 2 + 1]
             }
@@ -464,6 +498,13 @@ final class SystemPlayer {
         bufferStarts.append(nextFrame)
         nextFrame += Int64(n)
         return true
+    }
+
+    /// Where timeline frame `frame` sits in `history`. Frames shouldn't go
+    /// negative, but if one did, a plain modulo would index before the buffer.
+    private func historySlot(_ frame: Int64) -> Int {
+        let m = frame % historyFrames
+        return Int(m < 0 ? m + historyFrames : m) * 2
     }
 
     private func nowFrame() -> Int64 {
@@ -525,6 +566,9 @@ final class SystemPlayer {
     /// handlers by hand, since only a person can flip Control Center.
     func simulateConfigurationChange() { queue.async { self.outputConfigurationChanged() } }
     func simulateAutomaticFlush() { queue.async { self.renderer.flush(); self.flushedAutomatically(at: nil) } }
+    /// Takes the failed-renderer path (replace it, start over) on the next pump.
+    func simulateFailure() { queue.async { self.pretendFailed = true } }
+    private var pretendFailed = false
 
     /// Control Center's spatial setting changed (or something else
     /// reconfigured the output). Replace what's queued past the point that
@@ -586,11 +630,13 @@ final class SystemPlayer {
         while nextFrame < end {
             let n = Int(min(Int64(chunk), end - nextFrame))
             for i in 0..<n {
-                let slot = Int((nextFrame + Int64(i)) % historyFrames) * 2
+                let slot = historySlot(nextFrame + Int64(i))
                 staging[i * 2] = history[slot]
                 staging[i * 2 + 1] = history[slot + 1]
             }
-            applyFade(frames: n)
+            // No fade: history holds these exactly as first sent (any fade
+            // already in them), and a fade still in progress belongs to the
+            // new frames that follow, not to these.
             guard enqueue(frames: n, remember: false) else {
                 // Shouldn't happen; skip ahead rather than leave a hole
                 // the timeline thinks is filled.
@@ -634,6 +680,21 @@ final class SystemPlayer {
         let override = d.double(forKey: "targetLead")
         targetLead = override > 0 ? override : outputLatency + Self.margin
         trimming = d.object(forKey: "trimLatency") as? Bool ?? true
+        // Experiment: how the renderer stretches audio when it changes speed
+        // to re-sync (`defaults write local.spatial timePitch spectral |
+        // timeDomain | varispeed`). Unset leaves Apple's default.
+        if let name = d.string(forKey: "timePitch") {
+            let algorithm: AVAudioTimePitchAlgorithm? = switch name {
+                case "spectral": .spectral
+                case "timeDomain": .timeDomain
+                case "varispeed": .varispeed
+                default: nil
+            }
+            if let algorithm, renderer.audioTimePitchAlgorithm != algorithm {
+                renderer.audioTimePitchAlgorithm = algorithm
+                event("time pitch algorithm: \(algorithm.rawValue)")
+            }
+        }
     }
 
     private static let clock: DateFormatter = {

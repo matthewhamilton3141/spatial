@@ -37,7 +37,8 @@ is [install.sh](install.sh).)
 Then:
 
 1. Play something in Spotify. When macOS asks, allow **System Audio Recording**. That's how
-   Spatial takes Spotify's sound. Nothing is recorded, saved, or sent anywhere.
+   Spatial takes Spotify's sound. Nothing is recorded, saved, or sent anywhere. (Clicked
+   Don't Allow? Spotify keeps playing as usual; Spatial's menu has **Allow in System Settings…**.)
 2. Open **Control Center › your AirPods › Spatial Audio** and pick **Fixed** or **Head Tracked**.
 
 **Or by hand:** [download Spatial.zip](https://github.com/matthewhamilton3141/spatial/releases/latest/download/Spatial.zip),
@@ -45,10 +46,11 @@ unzip it, and drag **Spatial** into Applications. Spatial isn't notarized by App
 macOS blocks a downloaded copy the first time: go to **System Settings › Privacy & Security**,
 scroll down, and click **Open Anyway**.
 
-**Uninstall:** choose Quit Spatial in its menu and drag it to the Trash.
+**Uninstall:** choose Quit Spatial in its menu and drag it to the Trash. To also clear its
+permission and settings: `tccutil reset All local.spatial; defaults delete local.spatial`.
 
-Spatial lives in the menu bar (the dotted diamond). Its **Spatial Audio** switch (⌘S) turns
-it off, and Spotify goes straight back to normal: no reroute, no extra delay.
+Spatial lives in the menu bar (the dotted diamond). The **Spatial Audio** switch at the top
+of its menu turns it off, and Spotify goes straight back to normal: no reroute, no extra delay.
 
 ## Good to know
 
@@ -57,9 +59,17 @@ packets to your AirPods. In a crowded 2.4 GHz area (dorms, offices, apartments) 
 can't keep up and you hear static. **Fixed** sounds the same, minus the head tracking,
 and avoids it. This is Bluetooth, not Spatial: the audio Spatial hands to macOS is clean.
 
-**Delay.** Pause and skip land about 0.15 s later than in plain Spotify. When you press play,
-Spatial waits for your AirPods to wake up before it starts, so the music never has to skip
-to catch up.
+**Switching modes mid-song.** Going to or from Head Tracked makes the music dip in speed
+for a second or two. Your AirPods buffer about 80 ms more for head tracking, and Apple's
+renderer catches up gradually rather than with a gap. Pick a mode before you press play, or
+let it settle.
+
+**Delay.** Pause and skip land about 0.15 s later than in plain Spotify. When Spatial takes
+over (switching it on, or your AirPods reconnecting), the first fraction of a second is
+silent while your AirPods wake up; after that the music never has to skip to catch up.
+
+**AirPlay.** HomePods, Apple TVs and AirPlay speakers have no Spatial Audio menu, so Spatial
+steps aside there and Spotify plays as usual.
 
 **Lossless?** AirPods always receive AAC over Bluetooth, with or without Spatial. Spatial
 adds no loss of its own: with Spatial Audio set to Off, what it plays matches Spotify to
@@ -67,6 +77,9 @@ within -100 dB.
 
 **The recording indicator.** macOS may show its recording indicator while Spatial runs,
 because taking another app's sound uses the same permission as recording it.
+
+**Updates ask again.** Each new version asks for System Audio Recording once more. Spatial
+isn't signed with an Apple Developer ID, so macOS can't tell a new version is the same app.
 
 **Other apps.** `defaults write local.spatial target <bundle id prefix>`, then relaunch Spatial.
 

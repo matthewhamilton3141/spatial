@@ -164,6 +164,68 @@ func runSmokeTest() -> Bool {
         }
     }
 
+    // Property listeners really stop once removed (the block API's didn't,
+    // and stale ones kept rebuilding the tap). Exercised on a private
+    // aggregate device that's never started: invisible to other apps.
+    if let out = CA.defaultOutput(), let uid = CA.uid(out) {
+        let description: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "Spatial smoke", kAudioAggregateDeviceUIDKey: UUID().uuidString,
+            kAudioAggregateDeviceIsPrivateKey: true, kAudioAggregateDeviceMainSubDeviceKey: uid,
+            kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: uid]],
+        ]
+        var device = AudioObjectID(kAudioObjectUnknown)
+        if AudioHardwareCreateAggregateDevice(description as CFDictionary, &device) == noErr {
+            var fired = 0
+            let address = CA.address(kAudioDevicePropertyBufferFrameSize)
+            func setBufferSize(_ frames: UInt32) {
+                var a = address, v = frames
+                AudioObjectSetPropertyData(device, &a, 0, nil, UInt32(MemoryLayout<UInt32>.size), &v)
+                RunLoop.main.run(until: Date().addingTimeInterval(0.3))   // listeners deliver on main
+            }
+            let listener = PropertyListener(device, address) { fired += 1 }
+            setBufferSize(256)
+            let whileListening = fired
+            listener?.remove()
+            setBufferSize(512)
+            check("property listeners fire, and stop once removed", whileListening == 1 && fired == 1,
+                  "\(whileListening) while listening, \(fired - whileListening) after removal")
+            AudioHardwareDestroyAggregateDevice(device)
+        } else {
+            check("property listeners fire, and stop once removed", false, "couldn't make a test device")
+        }
+    }
+
+    // The tap is the last input stream of its device, after any inputs of
+    // the output's own (a USB headset's mic). Checked on a private device
+    // holding a microphone and a tap of nothing. No IOProc is made: that is
+    // what asks for microphone access.
+    let devices = CA.list(CA.system, kAudioHardwarePropertyDevices)
+    let micUID = devices.first { !CA.list($0, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput).isEmpty
+                                 && CA.list($0, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput).isEmpty }
+        .flatMap(CA.uid)
+    if let micUID, let out = CA.defaultOutput(), let outUID = CA.uid(out) {
+        let tap = CATapDescription(stereoMixdownOfProcesses: [])
+        tap.uuid = UUID(); tap.name = "Spatial smoke"; tap.isPrivate = true; tap.muteBehavior = .unmuted
+        var tapID = AudioObjectID(kAudioObjectUnknown), device = AudioObjectID(kAudioObjectUnknown)
+        let description: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "Spatial smoke", kAudioAggregateDeviceUIDKey: UUID().uuidString,
+            kAudioAggregateDeviceIsPrivateKey: true, kAudioAggregateDeviceMainSubDeviceKey: outUID,
+            kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: micUID], [kAudioSubDeviceUIDKey: outUID]],
+            kAudioAggregateDeviceTapListKey: [[kAudioSubTapUIDKey: tap.uuid.uuidString, kAudioSubTapDriftCompensationKey: false]],
+        ]
+        if AudioHardwareCreateProcessTap(tap, &tapID) == noErr,
+           AudioHardwareCreateAggregateDevice(description as CFDictionary, &device) == noErr {
+            let streams = CA.list(device, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput)
+            let channels = streams.map { CA.get($0, kAudioStreamPropertyVirtualFormat, as: AudioStreamBasicDescription.self)?.mChannelsPerFrame ?? 0 }
+            check("the tap comes after the output's own inputs", streams.count >= 2 && channels.last == 2,
+                  "input streams' channels: \(channels)")
+        } else {
+            check("the tap comes after the output's own inputs", false, "couldn't make a test device")
+        }
+        if device != kAudioObjectUnknown { AudioHardwareDestroyAggregateDevice(device) }
+        if tapID != kAudioObjectUnknown { AudioHardwareDestroyProcessTap(tapID) }
+    }
+
     // Core Audio queries the app relies on.
     let output = CA.defaultOutput()
     check("finds the output device", output != nil,
@@ -184,6 +246,7 @@ func runProbe() {
         print("output: none")
     }
     print("target: \(target)*")
+    print("system audio recording: \(AudioCapturePermission.status)")
     for p in CA.processes().sorted(by: { $0.bundleID < $1.bundleID }) {
         let mark = p.bundleID.hasPrefix(target) ? "→" : " "
         print("\(mark) \(p.isPlaying ? "▶" : " ") pid \(p.pid)\t\(p.bundleID.isEmpty ? "(no bundle id)" : p.bundleID)")
