@@ -29,7 +29,8 @@ Paste this into Terminal:
 curl -fsSL https://raw.githubusercontent.com/matthewhamilton3141/spatial/main/install.sh | sh
 ```
 
-It downloads the latest release, puts Spatial in Applications, and opens it. A copy that
+It downloads the latest release, puts Spatial in Applications, and opens it. From then on
+Spatial keeps itself up to date. A copy that
 arrives through curl isn't quarantined, so there's no Open Anyway step. (Options:
 `SPATIAL_INSTALL_DIR=~/Applications` or `SPATIAL_NO_OPEN=1` in front of `sh`. The script
 is [install.sh](install.sh).)
@@ -78,8 +79,12 @@ within -100 dB.
 **The recording indicator.** macOS may show its recording indicator while Spatial runs,
 because taking another app's sound uses the same permission as recording it.
 
-**Updates ask again.** Each new version asks for System Audio Recording once more. Spatial
-isn't signed with an Apple Developer ID, so macOS can't tell a new version is the same app.
+**Updates.** Once a day Spatial asks GitHub whether there's a newer version. If there is, it
+downloads it, checks it's genuine, and swaps it in once Spotify has been quiet for a couple
+of minutes (its menu also offers **Update to …** right away). Each new version asks for
+System Audio Recording once more: Spatial isn't signed with an Apple Developer ID, so macOS
+can't tell a new version is the same app. To turn updates off:
+`defaults write local.spatial autoUpdate -bool false`.
 
 **Other apps.** `defaults write local.spatial target <bundle id prefix>`, then relaunch Spatial.
 
